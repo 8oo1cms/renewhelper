@@ -715,10 +715,16 @@ function calculateStatus(item, timezone = "UTC") {
   const interval = Number(item.intervalDays),
     unit = item.cycleUnit || "day";
 
-  // 真实续期时间（用于展示“上次续期”）
-  const rObjRenew = Calc.parseYMD(rDate);
-  // 周期计算基准：优先使用 lastDueDate，其次退回到 lastRenewDate
-  const baseStr = item.lastDueDate || rDate;
+  const rObjRenew = Calc.parseYMD(rDate); // 上次实际续期时间
+
+  let baseStr;
+  if (item.type === "reset") {
+    // 到期重置：到期日基于“实际续费日(上次续期)” + 周期
+    baseStr = rDate;
+  } else {
+    // 循环订阅：优先使用 lastDueDate 作为链式周期基准
+    baseStr = item.lastDueDate || rDate || cDate;
+  }
   const baseObj = Calc.parseYMD(baseStr);
 
   let nextObj;
@@ -741,6 +747,26 @@ function calculateStatus(item, timezone = "UTC") {
     else if (unit === "month")
       nextObj.setUTCMonth(nextObj.getUTCMonth() + interval);
     else nextObj.setUTCDate(nextObj.getUTCDate() + interval);
+  }
+
+  // 计算“上次到期”显示值
+  let lastDueDisplay = null;
+  if (item.type === "reset") {
+    // 到期重置：last = next - 周期，如果早于创建日期，则清空
+    const lastDueObj = new Date(nextObj);
+    if (unit === "year")
+      lastDueObj.setUTCFullYear(lastDueObj.getUTCFullYear() - interval);
+    else if (unit === "month")
+      lastDueObj.setUTCMonth(lastDueObj.getUTCMonth() - interval);
+    else lastDueObj.setUTCDate(lastDueObj.getUTCDate() - interval);
+
+    const createObj = Calc.parseYMD(cDate);
+    if (lastDueObj >= createObj) {
+      lastDueDisplay = Calc.toYMD(lastDueObj);
+    }
+  } else {
+    // 循环订阅：last = 链式基准 (baseStr)
+    lastDueDisplay = Calc.toYMD(baseObj);
   }
 
   let lNext = "",
@@ -766,7 +792,7 @@ function calculateStatus(item, timezone = "UTC") {
     cycleUnit: unit,
     createDate: cDate,
     lastRenewDate: rDate,
-    lastDueDate: item.lastDueDate || Calc.toYMD(baseObj),
+    lastDueDate: lastDueDisplay,
     serviceDays: Math.floor((today - Calc.parseYMD(cDate)) / 86400000),
     daysLeft: Math.round((nextObj - today) / 86400000),
     nextDueDate: Calc.toYMD(nextObj),
@@ -2052,6 +2078,7 @@ const HTML = `<!DOCTYPE html>
                                 plain 
                                 class="!px-2 !py-1 !rounded-none"
                                 :icon="RefreshRight"
+                                :disabled="!isEdit"
                                 @click="handleDialogManualRenew">
                                 {{ lang === 'zh' ? '手动续期' : 'Manual Renew' }}
                             </el-button>
@@ -2061,6 +2088,7 @@ const HTML = `<!DOCTYPE html>
                                 plain 
                                 class="!px-2 !py-1 !rounded-none"
                                 :icon="RefreshRight"
+                                :disabled="!isEdit"
                                 @click="handleDialogUndoRenew">
                                 {{ lang === 'zh' ? '撤销' : 'Undo' }}
                             </el-button>
@@ -2318,7 +2346,8 @@ const HTML = `<!DOCTYPE html>
                 const channelMap = reactive({ telegram:false, bark:false, pushplus:false, notifyx:false, resend:false, webhook:false, webhook2:false, webhook3:false });
                 const testing = reactive({ telegram:false, bark:false, pushplus:false, notifyx:false, resend:false, webhook:false, webhook2:false, webhook3:false });
 
-                const lastEditSnapshot = ref(null);
+                // 编辑弹窗内的多步撤销栈（仅记录手动续期前的表单快照）
+                const editSnapshots = ref([]);
                 
                 // Dark Mode State
                 const isDark = ref(document.documentElement.classList.contains('dark'));
@@ -2631,6 +2660,7 @@ const HTML = `<!DOCTYPE html>
 
         const openAdd = () => { 
             isEdit.value=false; 
+            editSnapshots.value = [];
             const d=getLocalToday(); 
             form.value={
                 id:Date.now().toString(),
@@ -2655,6 +2685,7 @@ const HTML = `<!DOCTYPE html>
         };
         const editItem = (row) => { 
             isEdit.value=true; 
+            editSnapshots.value = [];
             form.value={
                 ...row,
                 cycleUnit:row.cycleUnit||'day',
@@ -2770,8 +2801,9 @@ const HTML = `<!DOCTYPE html>
 
                 const handleDialogManualRenew = () => {
                     // 只在编辑表单中模拟手动续期，不直接保存到后端
-                    if (!previewData.value) return;
-                    lastEditSnapshot.value = JSON.parse(JSON.stringify(form.value));
+                    if (!previewData.value || !isEdit.value) return;
+                    // 将当前状态压入撤销栈
+                    editSnapshots.value.push(JSON.parse(JSON.stringify(form.value)));
 
                     const todayStr = getLocalToday();
 
@@ -2786,9 +2818,9 @@ const HTML = `<!DOCTYPE html>
                 };
 
                 const handleDialogUndoRenew = () => {
-                    if (!lastEditSnapshot.value) return;
-                    form.value = JSON.parse(JSON.stringify(lastEditSnapshot.value));
-                    lastEditSnapshot.value = null;
+                    if (!isEdit.value || !editSnapshots.value.length) return;
+                    const snap = editSnapshots.value.pop();
+                    form.value = JSON.parse(JSON.stringify(snap));
                 };
 
                 const timezoneList = [
