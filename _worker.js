@@ -991,6 +991,9 @@ async function checkAndRenew(env, isSched, lang = "zh") {
           new: newD,
           note: msg,
         });
+        // 记录自动续期信息
+        it.lastDueDate = st.nextDueDate || it.lastDueDate || null;
+        it.autoRenewCount = (it.autoRenewCount || 0) + 1;
         it.lastRenewDate = newD;
         items[i] = it;
         changed = true;
@@ -1976,7 +1979,22 @@ const HTML = `<!DOCTYPE html>
                         <div class="flex justify-between items-center p-3 pl-5">
                             <div>
                                 <div class="text-[10px] font-bold text-slate-400 uppercase tracking-wider font-mono mb-0.5">{{ t('nextDue') }}</div>
-                                <div class="text-xl font-bold text-slate-700 dark:text-slate-200 font-mono tracking-tight leading-none">{{ previewData.date }}</div>
+                                <div class="grid grid-cols-3 gap-3 text-[11px] font-mono text-slate-600 dark:text-slate-200">
+                                    <div>
+                                        <div class="text-[9px] uppercase text-slate-400">LAST</div>
+                                        <div class="font-bold truncate">{{ previewData.last || '-' }}</div>
+                                    </div>
+                                    <div>
+                                        <div class="text-[9px] uppercase text-slate-400">NEXT</div>
+                                        <div class="font-bold truncate">{{ previewData.next }}</div>
+                                    </div>
+                                    <div class="text-right">
+                                        <div class="text-[9px] uppercase text-slate-400">{{ lang === 'zh' ? '距今' : 'LEFT' }}</div>
+                                        <div class="font-bold truncate" :class="getDaysClass(previewData.diffDays)">
+                                            {{ previewData.diffDays }} {{ lang === 'zh' ? '天' : 'd' }}
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
                             <div class="text-right">
                                  <div class="text-[10px] text-slate-400 font-mono mb-0.5">{{ t('previewCalc') }}</div>
@@ -2000,6 +2018,42 @@ const HTML = `<!DOCTYPE html>
                     </div>
 
                     <el-form-item :label="t('note')"><el-input v-model="form.message" type="textarea" rows="2"></el-input></el-form-item>
+
+                    <div class="flex items-center justify-between mb-4 text-xs text-slate-500 font-mono">
+                        <div class="flex items-center gap-2">
+                            <span>{{ lang === 'zh' ? '续期次数' : 'Renew Count' }}:</span>
+                            <span class="font-bold text-emerald-600">
+                                A: {{ form.autoRenewCount || 0 }}
+                            </span>
+                            <span class="font-bold text-blue-600">
+                                M: {{ form.manualRenewCount || 0 }}
+                            </span>
+                            <span>=</span>
+                            <span class="font-bold text-slate-800 dark:text-slate-100">
+                                {{ (form.autoRenewCount || 0) + (form.manualRenewCount || 0) }}
+                            </span>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <el-button 
+                                size="small" 
+                                type="success" 
+                                plain 
+                                class="!px-2 !py-1 !rounded-none"
+                                :icon="RefreshRight"
+                                @click="handleDialogManualRenew">
+                                {{ lang === 'zh' ? '手动续期' : 'Manual Renew' }}
+                            </el-button>
+                            <el-button 
+                                size="small" 
+                                type="danger" 
+                                plain 
+                                class="!px-2 !py-1 !rounded-none"
+                                :icon="RefreshRight"
+                                @click="handleDialogUndoRenew">
+                                {{ lang === 'zh' ? '撤销' : 'Undo' }}
+                            </el-button>
+                        </div>
+                    </div>
                 </el-form>
                 
                 <template #footer>
@@ -2239,7 +2293,7 @@ const HTML = `<!DOCTYPE html>
                 const dialogVisible = ref(false), settingsVisible = ref(false), historyVisible = ref(false), historyLoading = ref(false), historyLogs = ref([]);
                 const checking = ref(false), logs = ref([]), displayLogs = ref([]), isEdit = ref(false), lang = ref('zh'), currentTag = ref(''), searchKeyword = ref('');
                 const locale = ref(ZhCn), tableKey = ref(0), termRef = ref(null);
-                const form = ref({ id:'', name:'', createDate:'', lastRenewDate:'', intervalDays:30, cycleUnit:'day', type:'cycle', message:'', enabled:true, tags:[], useLunar:false, notifyDays:3, notifyTime: '08:00', autoRenew:true, autoRenewDays:3 });
+                const form = ref({ id:'', name:'', createDate:'', lastRenewDate:'', lastDueDate:'', intervalDays:30, cycleUnit:'day', type:'cycle', message:'', enabled:true, tags:[], useLunar:false, notifyDays:3, notifyTime: '08:00', autoRenew:true, autoRenewDays:3, autoRenewCount:0, manualRenewCount:0 });
                 const settingsForm = ref({ 
                     notifyUrl:'', 
                     enableNotify:true, 
@@ -2251,6 +2305,8 @@ const HTML = `<!DOCTYPE html>
                 });
                 const channelMap = reactive({ telegram:false, bark:false, pushplus:false, notifyx:false, resend:false, webhook:false, webhook2:false, webhook3:false });
                 const testing = reactive({ telegram:false, bark:false, pushplus:false, notifyx:false, resend:false, webhook:false, webhook2:false, webhook3:false });
+
+                const lastEditSnapshot = ref(null);
                 
                 // Dark Mode State
                 const isDark = ref(document.documentElement.classList.contains('dark'));
@@ -2561,8 +2617,47 @@ const HTML = `<!DOCTYPE html>
                     } catch (e) { return isoStr; }
                 };                
 
-                const openAdd = () => { isEdit.value=false; const d=getLocalToday(); form.value={id:Date.now().toString(),name:'',createDate:d,lastRenewDate:d,intervalDays:30,cycleUnit:'day',type:'cycle',enabled:true,tags:[],useLunar:false, notifyDays:3, notifyTime: '08:00', autoRenew:true, autoRenewDays:3}; dialogVisible.value=true; };
-                const editItem = (row) => { isEdit.value=true; form.value={...row,cycleUnit:row.cycleUnit||'day',tags:[...(row.tags||[])],useLunar:!!row.useLunar, notifyDays:(row.notifyDays!==undefined?row.notifyDays:3), notifyTime: (row.notifyTime || '08:00'), autoRenew:row.autoRenew!==false, autoRenewDays:(row.autoRenewDays!==undefined?row.autoRenewDays:3)}; dialogVisible.value=true; };
+        const openAdd = () => { 
+            isEdit.value=false; 
+            const d=getLocalToday(); 
+            form.value={
+                id:Date.now().toString(),
+                name:'',
+                createDate:d,
+                lastRenewDate:d,
+                lastDueDate:'',
+                intervalDays:30,
+                cycleUnit:'day',
+                type:'cycle',
+                enabled:true,
+                tags:[],
+                useLunar:false,
+                notifyDays:3,
+                notifyTime: '08:00',
+                autoRenew:true,
+                autoRenewDays:3,
+                autoRenewCount:0,
+                manualRenewCount:0
+            }; 
+            dialogVisible.value=true; 
+        };
+        const editItem = (row) => { 
+            isEdit.value=true; 
+            form.value={
+                ...row,
+                cycleUnit:row.cycleUnit||'day',
+                tags:[...(row.tags||[])],
+                useLunar:!!row.useLunar,
+                notifyDays:(row.notifyDays!==undefined?row.notifyDays:3),
+                notifyTime: (row.notifyTime || '08:00'),
+                autoRenew:row.autoRenew!==false,
+                autoRenewDays:(row.autoRenewDays!==undefined?row.autoRenewDays:3),
+                lastDueDate:row.lastDueDate || '',
+                autoRenewCount:row.autoRenewCount || 0,
+                manualRenewCount:row.manualRenewCount || 0
+            }; 
+            dialogVisible.value=true; 
+        };
                 const openSettings = () => { 
                     settingsForm.value = JSON.parse(JSON.stringify(settings.value)); 
                     const chans = settingsForm.value.enabledChannels || [];
@@ -2648,27 +2743,62 @@ const HTML = `<!DOCTYPE html>
 
                     if (row.type === 'cycle') {
                         // 循环订阅：以当前「下次到期日」为基准 +1 个周期
-                        // 关键点：把 lastRenewDate 改成当前 nextDueDate，
-                        // 这样后端 calculateStatus 会按 (lastRenewDate + 周期) 推出新的下次到期
+                        // 先记录本次触发前的“上次到期日”
+                        if (row.nextDueDate) {
+                            row.lastDueDate = row.nextDueDate;
+                        }
                         const baseNext = row.nextDueDate;
                         const intv = Number(row.intervalDays);
                         if (!baseNext || !intv) {
                             // 配置异常时退回到“按当前日期重置”
                             newLastRenew = getLocalToday();
                         } else {
+                            // 把 lastRenewDate 改成当前 nextDueDate，后端会据此计算新的 nextDueDate
                             newLastRenew = baseNext;
                         }
                     } else {
                         // 到期重置：将上次续期日期改成当前，从当前日起重新计算下次到期
+                        if (row.nextDueDate) {
+                            row.lastDueDate = row.nextDueDate;
+                        }
                         newLastRenew = getLocalToday();
                     }
 
                     row.lastRenewDate = newLastRenew;
+                    row.manualRenewCount = (row.manualRenewCount || 0) + 1;
 
                     await saveData(null, null, false);
 
                     tableKey.value++; 
                     ElMessage.success(t('msg.renewSuccess').replace('%s', oldDate).replace('%t', newLastRenew));
+                };
+
+                const handleDialogManualRenew = () => {
+                    // 只在编辑表单中操作，不直接保存到后端
+                    if (!previewData.value) return;
+                    lastEditSnapshot.value = JSON.parse(JSON.stringify(form.value));
+
+                    if (form.value.type === 'cycle') {
+                        // 循环订阅：以当前预览的下次到期日作为“上次到期”，并推进一个周期
+                        const baseNext = previewData.value.next;
+                        if (baseNext) {
+                            form.value.lastDueDate = baseNext;
+                            form.value.lastRenewDate = baseNext;
+                        }
+                    } else {
+                        // 到期重置：记录当前预览的下次到期为“上次到期”，然后将 lastRenewDate 设为今天
+                        if (previewData.value.next) {
+                            form.value.lastDueDate = previewData.value.next;
+                        }
+                        form.value.lastRenewDate = getLocalToday();
+                    }
+                    form.value.manualRenewCount = (form.value.manualRenewCount || 0) + 1;
+                };
+
+                const handleDialogUndoRenew = () => {
+                    if (!lastEditSnapshot.value) return;
+                    form.value = JSON.parse(JSON.stringify(lastEditSnapshot.value));
+                    lastEditSnapshot.value = null;
                 };
 
                 const timezoneList = [
@@ -2699,7 +2829,7 @@ const HTML = `<!DOCTYPE html>
 
 
                 const previewData = computed(() => {
-                    const { lastRenewDate, intervalDays, cycleUnit, useLunar } = form.value;
+                    const { lastRenewDate, lastDueDate, intervalDays, cycleUnit, useLunar } = form.value;
                     if (!lastRenewDate || !intervalDays) return null;
                     try {
                         const date = parseYMD(lastRenewDate);
@@ -2718,7 +2848,12 @@ const HTML = `<!DOCTYPE html>
                         const nextStr = nextDate.toISOString().split('T')[0];
                         const diff = Math.ceil((nextDate - parseYMD(getLocalToday())) / (1000 * 3600 * 24));
                         const diffStr = (lang.value === 'zh' ? '距今 ' : 'Today ') + (diff > 0 ? '+' : '') + diff + ' ' + (lang.value === 'zh' ? '天' : 'Days');
-                        return { date: nextStr, diff: diffStr };
+                        return { 
+                            last: lastDueDate || '', 
+                            next: nextStr, 
+                            diff: diffStr,
+                            diffDays: diff
+                        };
                     } catch (e) { return null; }
                 });
 
@@ -2767,7 +2902,7 @@ const HTML = `<!DOCTYPE html>
                     openAdd, editItem, deleteItem, saveItem, openSettings, saveSettings, runCheck, openHistoryLogs, clearLogs, toggleEnable,importRef, exportData, triggerImport, handleImportFile,
                     Edit, Delete, Plus, VideoPlay, Setting, Bell, Document, Lock, Monitor, SwitchButton, Calendar, Timer, Files, AlarmClock, Warning, Search, Cpu, Link, Message, Promotion, Iphone, Moon, Sunny,
                     getDaysClass, formatDaysLeft, getTagClass, getLogColor, getLunarStr, getYearGanZhi, getSmartLunarText, getLunarTooltip, getMonthStr, getTagCount, tableRowClassName, channelMap, toggleChannel, testChannel, testing,
-                    calendarUrl, copyIcsUrl, resetCalendarToken,manualRenew,RefreshRight,timezoneList,currentPage, pageSize, pagedList, previewData,
+                    calendarUrl, copyIcsUrl, resetCalendarToken,manualRenew,RefreshRight,timezoneList,currentPage, pageSize, pagedList, previewData, handleDialogManualRenew, handleDialogUndoRenew,
                     isDark, toggleTheme, drawerSize, actionColWidth, paginationLayout, confirmDelete, confirmRenew, More, windowWidth,
                     handleSortChange, handleFilterChange, 
                     nextDueFilters, typeFilters, uptimeFilters, lastRenewFilters
