@@ -943,6 +943,7 @@ async function checkAndRenew(env, isSched, lang = "zh") {
     // --- 逻辑 B: 自动续期 ---
     else if (iAutoRenew && days <= -Math.abs(iRenewDays)) {
       log(t("autoRenew", lang, it.name));
+      const oldNext = st.nextDueDate; // 续期前的 next
       const rObj = Calc.parseYMD(it.lastRenewDate),
         unit = it.cycleUnit || "day",
         intv = Number(it.intervalDays);
@@ -1025,11 +1026,18 @@ async function checkAndRenew(env, isSched, lang = "zh") {
           note: msg,
         });
         // 记录自动续期信息：
-        // - lastDueDate 记录续期前的到期日
         // - lastRenewDate 记录本次执行续期的“今天”
-        it.lastDueDate = st.nextDueDate || it.lastDueDate || null;
+        // - lastDueDate 只有在 next 改变时才更新为“之前的 next”
         it.autoRenewCount = (it.autoRenewCount || 0) + 1;
         it.lastRenewDate = Calc.toYMD(today);
+
+        // 重新计算续期后的 next，用于对比是否发生变化
+        const st2 = calculateStatus(it, s.timezone);
+        const newNext = st2.nextDueDate;
+        if (newNext !== oldNext) {
+          it.lastDueDate = oldNext || it.lastDueDate || null;
+        }
+
         items[i] = it;
         changed = true;
       }
