@@ -2888,11 +2888,20 @@ const HTML = `<!DOCTYPE html>
 
 
                 const previewData = computed(() => {
-                    const { lastRenewDate, lastDueDate, intervalDays, cycleUnit, useLunar, createDate } = form.value;
+                    const { lastRenewDate, lastDueDate, intervalDays, cycleUnit, useLunar, createDate, type } = form.value;
                     if (!intervalDays) return null;
                     try {
                         // 周期计算基准：优先使用 lastDueDate，其次 lastRenewDate，再次 createDate
-                        const baseStr = lastDueDate || lastRenewDate || createDate;
+                        // 【修复】到期重置(reset)类型不应使用 lastDueDate，否则会导致手动续期时日期累加
+                        let baseStr;
+                        if (type === 'reset') {
+                            // Reset 模式：始终基于“上次续期”或“创建日期”计算下一次
+                            baseStr = lastRenewDate || createDate;
+                        } else {
+                            // Cycle 模式：基于“链式基准”(lastDueDate) 推进
+                            baseStr = lastDueDate || lastRenewDate || createDate;
+                        }
+
                         if (!baseStr) return null;
                         const base = parseYMD(baseStr);
                         let nextDate;
