@@ -1025,18 +1025,47 @@ async function checkAndRenew(env, isSched, lang = "zh") {
           new: newD,
           note: msg,
         });
-        // 记录自动续期信息：
-        // - lastRenewDate 记录本次执行续期的“今天”
-        // - lastDueDate 只有在 next 改变时才更新为“之前的 next”
-        it.autoRenewCount = (it.autoRenewCount || 0) + 1;
-        it.lastRenewDate = Calc.toYMD(today);
 
-        // 重新计算续期后的 next，用于对比是否发生变化
+        // ==========================================
+        // 核心修复逻辑 (v1.4.2)
+        // 1. 到期重置 (Expiration Reset)
+        // 2. 只有当 Next 发生变化时，才更新 Last
+        // ==========================================
+
+        // 暂存旧状态
+        const originalLastDueDate = it.lastDueDate;
+
+        // A. 预测本次应该使用的 lastDueDate
+        let proposedLastDueDate = it.lastDueDate;
+
+        // 如果是循环订阅(reset类型本身逻辑已处理)，且已过期
+        if (it.type !== "reset" && oldNext < Calc.toYMD(today)) {
+          // 过期重置：将链式基准重置为“今天”
+          // 这样下一次到期就是 Today + Cycle
+          proposedLastDueDate = Calc.toYMD(today);
+        } else {
+          // 未过期或正常续期：链式推进
+          // 将 last 更新为“上一次的 next”
+          proposedLastDueDate = oldNext || it.lastDueDate || Calc.toYMD(today);
+        }
+
+        // B. 尝试应用新的 lastDueDate 并计算
+        it.lastRenewDate = Calc.toYMD(today);
+        it.autoRenewCount = (it.autoRenewCount || 0) + 1;
+
+        // 临时应用
+        it.lastDueDate = proposedLastDueDate;
+
+        // 重新计算
         const st2 = calculateStatus(it, s.timezone);
         const newNext = st2.nextDueDate;
-        if (newNext !== oldNext) {
-          it.lastDueDate = oldNext || it.lastDueDate || null;
+
+        // C. 判定逻辑：只有 Next 发生变化，才确认同步 Last
+        // 如果 Next 没变 (例如周期推算异常)，则回滚 Last，避免错误的推进
+        if (newNext === oldNext) {
+          it.lastDueDate = originalLastDueDate;
         }
+        // 否则 Keep proposedLastDueDate (已赋值)
 
         items[i] = it;
         changed = true;
