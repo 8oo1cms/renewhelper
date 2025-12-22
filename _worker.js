@@ -714,22 +714,28 @@ function calculateStatus(item, timezone = "UTC") {
     rDate = item.lastRenewDate || cDate;
   const interval = Number(item.intervalDays),
     unit = item.cycleUnit || "day";
-  const rObj = Calc.parseYMD(rDate);
+
+  // 真实续期时间（用于展示“上次续期”）
+  const rObjRenew = Calc.parseYMD(rDate);
+  // 周期计算基准：优先使用 lastDueDate，其次退回到 lastRenewDate
+  const baseStr = item.lastDueDate || rDate;
+  const baseObj = Calc.parseYMD(baseStr);
+
   let nextObj;
 
   if (item.useLunar) {
     let l = LUNAR_DATA.solar2lunar(
-      rObj.getUTCFullYear(),
-      rObj.getUTCMonth() + 1,
-      rObj.getUTCDate()
+      baseObj.getUTCFullYear(),
+      baseObj.getUTCMonth() + 1,
+      baseObj.getUTCDate()
     );
     if (l) {
       let nl = calcBiz.addPeriod(l, interval, unit);
       let s = calcBiz.l2s(nl);
       nextObj = new Date(Date.UTC(s.year, s.month - 1, s.day));
-    } else nextObj = new Date(rObj);
+    } else nextObj = new Date(baseObj);
   } else {
-    nextObj = new Date(rObj);
+    nextObj = new Date(baseObj);
     if (unit === "year")
       nextObj.setUTCFullYear(nextObj.getUTCFullYear() + interval);
     else if (unit === "month")
@@ -747,9 +753,9 @@ function calculateStatus(item, timezone = "UTC") {
     );
     if (ln) lNext = ln.fullStr;
     const ll = LUNAR_DATA.solar2lunar(
-      rObj.getUTCFullYear(),
-      rObj.getUTCMonth() + 1,
-      rObj.getUTCDate()
+      rObjRenew.getUTCFullYear(),
+      rObjRenew.getUTCMonth() + 1,
+      rObjRenew.getUTCDate()
     );
     if (ll) lLast = ll.fullStr;
   }
@@ -760,6 +766,7 @@ function calculateStatus(item, timezone = "UTC") {
     cycleUnit: unit,
     createDate: cDate,
     lastRenewDate: rDate,
+    lastDueDate: item.lastDueDate || Calc.toYMD(baseObj),
     serviceDays: Math.floor((today - Calc.parseYMD(cDate)) / 86400000),
     daysLeft: Math.round((nextObj - today) / 86400000),
     nextDueDate: Calc.toYMD(nextObj),
@@ -991,10 +998,12 @@ async function checkAndRenew(env, isSched, lang = "zh") {
           new: newD,
           note: msg,
         });
-        // 记录自动续期信息
+        // 记录自动续期信息：
+        // - lastDueDate 记录续期前的到期日
+        // - lastRenewDate 记录本次执行续期的“今天”
         it.lastDueDate = st.nextDueDate || it.lastDueDate || null;
         it.autoRenewCount = (it.autoRenewCount || 0) + 1;
-        it.lastRenewDate = newD;
+        it.lastRenewDate = Calc.toYMD(today);
         items[i] = it;
         changed = true;
       }
@@ -1225,6 +1234,9 @@ app.post(
       notifyTime: i.notifyTime || "08:00",
       autoRenew: i.autoRenew !== false,
       autoRenewDays: i.autoRenewDays !== null ? Number(i.autoRenewDays) : null,
+      lastDueDate: i.lastDueDate || null,
+      autoRenewCount: typeof i.autoRenewCount === "number" ? i.autoRenewCount : 0,
+      manualRenewCount: typeof i.manualRenewCount === "number" ? i.manualRenewCount : 0,
     }));
 
     const currentSettings = await DataStore.getSettings(env);
@@ -1809,7 +1821,7 @@ const HTML = `<!DOCTYPE html>
                         <div class="grid grid-cols-3 gap-1 text-[10px] font-mono text-textDim">
                             <div>
                                 <div class="uppercase text-[9px] text-gray-400">LAST</div>
-                                <div class="truncate">{{ scope.row.lastRenewDate }}</div>
+                                <div class="truncate">{{ scope.row.lastDueDate || '-' }}</div>
                             </div>
                             <div>
                                 <div class="uppercase text-[9px] text-gray-400">NEXT</div>
@@ -2739,59 +2751,37 @@ const HTML = `<!DOCTYPE html>
 
                 const manualRenew = async (row) => {
                     const oldDate = row.lastRenewDate;
-                    let newLastRenew;
+                    const todayStr = getLocalToday();
 
-                    if (row.type === 'cycle') {
-                        // 循环订阅：以当前「下次到期日」为基准 +1 个周期
-                        // 先记录本次触发前的“上次到期日”
-                        if (row.nextDueDate) {
-                            row.lastDueDate = row.nextDueDate;
-                        }
-                        const baseNext = row.nextDueDate;
-                        const intv = Number(row.intervalDays);
-                        if (!baseNext || !intv) {
-                            // 配置异常时退回到“按当前日期重置”
-                            newLastRenew = getLocalToday();
-                        } else {
-                            // 把 lastRenewDate 改成当前 nextDueDate，后端会据此计算新的 nextDueDate
-                            newLastRenew = baseNext;
-                        }
-                    } else {
-                        // 到期重置：将上次续期日期改成当前，从当前日起重新计算下次到期
-                        if (row.nextDueDate) {
-                            row.lastDueDate = row.nextDueDate;
-                        }
-                        newLastRenew = getLocalToday();
+                    // 续期前的“下次到期日”作为这次操作的 lastDueDate（上次到期）
+                    if (row.nextDueDate) {
+                        row.lastDueDate = row.nextDueDate;
                     }
 
-                    row.lastRenewDate = newLastRenew;
+                    // 上次续期时间始终记为当前本地时间
+                    row.lastRenewDate = todayStr;
                     row.manualRenewCount = (row.manualRenewCount || 0) + 1;
 
                     await saveData(null, null, false);
 
                     tableKey.value++; 
-                    ElMessage.success(t('msg.renewSuccess').replace('%s', oldDate).replace('%t', newLastRenew));
+                    ElMessage.success(t('msg.renewSuccess').replace('%s', oldDate).replace('%t', todayStr));
                 };
 
                 const handleDialogManualRenew = () => {
-                    // 只在编辑表单中操作，不直接保存到后端
+                    // 只在编辑表单中模拟手动续期，不直接保存到后端
                     if (!previewData.value) return;
                     lastEditSnapshot.value = JSON.parse(JSON.stringify(form.value));
 
-                    if (form.value.type === 'cycle') {
-                        // 循环订阅：以当前预览的下次到期日作为“上次到期”，并推进一个周期
-                        const baseNext = previewData.value.next;
-                        if (baseNext) {
-                            form.value.lastDueDate = baseNext;
-                            form.value.lastRenewDate = baseNext;
-                        }
-                    } else {
-                        // 到期重置：记录当前预览的下次到期为“上次到期”，然后将 lastRenewDate 设为今天
-                        if (previewData.value.next) {
-                            form.value.lastDueDate = previewData.value.next;
-                        }
-                        form.value.lastRenewDate = getLocalToday();
+                    const todayStr = getLocalToday();
+
+                    // 续期前的“下次到期日”作为这次操作的 lastDueDate（上次到期）
+                    if (previewData.value.next) {
+                        form.value.lastDueDate = previewData.value.next;
                     }
+
+                    // 上次续期时间始终记为当前本地时间
+                    form.value.lastRenewDate = todayStr;
                     form.value.manualRenewCount = (form.value.manualRenewCount || 0) + 1;
                 };
 
@@ -2829,18 +2819,21 @@ const HTML = `<!DOCTYPE html>
 
 
                 const previewData = computed(() => {
-                    const { lastRenewDate, lastDueDate, intervalDays, cycleUnit, useLunar } = form.value;
-                    if (!lastRenewDate || !intervalDays) return null;
+                    const { lastRenewDate, lastDueDate, intervalDays, cycleUnit, useLunar, createDate } = form.value;
+                    if (!intervalDays) return null;
                     try {
-                        const date = parseYMD(lastRenewDate);
+                        // 周期计算基准：优先使用 lastDueDate，其次 lastRenewDate，再次 createDate
+                        const baseStr = lastDueDate || lastRenewDate || createDate;
+                        if (!baseStr) return null;
+                        const base = parseYMD(baseStr);
                         let nextDate;
                         if (useLunar) {
-                            const l = LUNAR.solar2lunar(date.getFullYear(), date.getMonth() + 1, date.getDate());
+                            const l = LUNAR.solar2lunar(base.getFullYear(), base.getMonth() + 1, base.getDate());
                             const nl = frontendCalc.addPeriod({ year: l.year, month: l.month, day: l.day, isLeap: l.isLeap }, intervalDays, cycleUnit);
                             const ns = frontendCalc.l2s(nl);
                             nextDate = new Date(Date.UTC(ns.year, ns.month - 1, ns.day));
                         } else {
-                            nextDate = new Date(date);
+                            nextDate = new Date(base);
                             if (cycleUnit === 'day') nextDate.setDate(nextDate.getDate() + intervalDays);
                             else if (cycleUnit === 'month') nextDate.setMonth(nextDate.getMonth() + intervalDays);
                             else if (cycleUnit === 'year') nextDate.setFullYear(nextDate.getFullYear() + intervalDays);
@@ -2849,7 +2842,7 @@ const HTML = `<!DOCTYPE html>
                         const diff = Math.ceil((nextDate - parseYMD(getLocalToday())) / (1000 * 3600 * 24));
                         const diffStr = (lang.value === 'zh' ? '距今 ' : 'Today ') + (diff > 0 ? '+' : '') + diff + ' ' + (lang.value === 'zh' ? '天' : 'Days');
                         return { 
-                            last: lastDueDate || '', 
+                            last: baseStr, 
                             next: nextStr, 
                             diff: diffStr,
                             diffDays: diff
